@@ -23,6 +23,7 @@ const config: Phaser.Types.Core.GameConfig = {
       enableSleeping: false,
       positionIterations: 8,
       velocityIterations: 6,
+      autoUpdate: false, // GameScene steps manually at a fixed 60Hz (determinism)
       debug: false,
     },
   },

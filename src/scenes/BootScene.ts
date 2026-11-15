@@ -18,24 +18,39 @@ export class BootScene extends Phaser.Scene {
   }
 
   private makePancakeTexture(): void {
+    // TOP: golden, toasted spots, butter pat — face-up must be unmistakable.
     const g = this.add.graphics();
     const W = 200;
     const H = 48;
-    // shadow rim
     g.fillStyle(0xb96f12, 1);
     g.fillEllipse(W / 2, H / 2 + 4, W, H - 4);
-    // body
     g.fillStyle(0xf2b544, 1);
     g.fillEllipse(W / 2, H / 2, W, H - 6);
-    // top face
     g.fillStyle(0xffcf6b, 1);
     g.fillEllipse(W / 2, H / 2 - 4, W - 14, H - 16);
-    // toasted spots
     g.fillStyle(0xd98e1e, 0.55);
     g.fillEllipse(W * 0.32, H * 0.42, 26, 9);
     g.fillEllipse(W * 0.62, H * 0.36, 20, 7);
     g.fillEllipse(W * 0.5, H * 0.55, 15, 6);
+    // butter pat
+    g.fillStyle(0xfff3a6, 1);
+    g.fillRoundedRect(W / 2 - 13, H / 2 - 13, 26, 13, 3);
+    g.fillStyle(0xffe066, 1);
+    g.fillRoundedRect(W / 2 - 13, H / 2 - 13, 26, 5, 3);
+    g.generateTexture('pancake_top', W, H);
     g.generateTexture('pancake', W, H);
+    g.clear();
+    // BOTTOM: paler, flatter, no butter, faint spots.
+    g.fillStyle(0xcfa15c, 1);
+    g.fillEllipse(W / 2, H / 2 + 4, W, H - 4);
+    g.fillStyle(0xe8c98a, 1);
+    g.fillEllipse(W / 2, H / 2, W, H - 6);
+    g.fillStyle(0xf0d9a4, 1);
+    g.fillEllipse(W / 2, H / 2 - 3, W - 14, H - 16);
+    g.fillStyle(0xd9b878, 0.5);
+    g.fillEllipse(W * 0.4, H * 0.45, 22, 8);
+    g.fillEllipse(W * 0.66, H * 0.4, 16, 6);
+    g.generateTexture('pancake_bottom', W, H);
     g.destroy();
   }
 

@@ -2,45 +2,35 @@ import Phaser from 'phaser';
 import { GAME, INPUT, clamp01, type ControlMode, type FlipSettings } from '../config';
 
 /**
- * A single flip gesture, normalised so physics mapping is identical
- * no matter which device produced it. THIS is the determinism contract:
- * the same FlipInput always produces the same launch.
+ * A single flip gesture. Power and spin are INDEPENDENT player inputs —
+ * the game never calibrates spin to the throw. Matching them is the skill.
  */
 export interface FlipInput {
-  /** 0..1 launch strength */
-  power: number;
-  /** 0..1 spin amount (maps to angular velocity; ~0.45 ≈ one clean flip for a medium toss) */
-  spin: number;
-  /** -1..1 horizontal intent (tilt / swipe drift / circle direction) */
-  drift: number;
+  power: number; // 0..1 launch strength (height)
+  spin: number; // 0..1 rotation amount (flips on a reference throw)
+  spinDir?: 1 | -1;
+  drift: number; // -1..1 horizontal intent
   source: 'motion' | 'swipe' | 'circular' | 'drag' | 'keyboard';
 }
 
 export type FlipHandler = (input: FlipInput) => void;
 
 /**
- * One interface for every input method.
- * To ship with Capacitor later: implement this same interface with the
- * Capacitor Motion plugin (e.g. @capacitor/motion) and swap it in
- * GameScene — no gameplay code changes.
+ * One interface for every input method. A Capacitor Motion implementation
+ * swaps in here later — same interface, no gameplay changes.
  */
 export interface IInputController {
   enable(): void;
   disable(): void;
   destroy(): void;
   setSettings(s: FlipSettings): void;
-  /** Live gesture feedback 0..1 for the power meter (0 when idle). */
   getCharge(): number;
-  /**
-   * Continuous horizontal steering input, -1 (full left) .. 1 (full right).
-   * Sources, in priority order: arrow/A-D keys held, pointer held down
-   * (position vs screen centre), device tilt (devicemotion gravity X).
-   * GameScene applies this only while a pancake is flying.
-   */
   getTilt(): number;
+  /** Called by the game on launch so pointer steering can't leak from the
+   *  swipe that just launched the pancake. */
+  markLaunch(): void;
 }
 
-/** iOS 13+ requires a user-gesture permission call for DeviceMotion. */
 export async function requestMotionPermission(): Promise<boolean> {
   const DME = DeviceMotionEvent as unknown as {
     requestPermission?: () => Promise<'granted' | 'denied'>;
@@ -60,21 +50,12 @@ export function motionNeedsPermission(): boolean {
   return typeof DME?.requestPermission === 'function';
 }
 
-/**
- * Unified controller: motion (flick) + swipe + circular mouse + drag fallback
- * + Space key (desktop testing). Mode setting filters which are active:
- *  - auto:     motion if available, plus swipe on touch, circular+drag on mouse
- *  - motion:   motion + swipe fallback
- *  - swipe:    swipe / drag only
- *  - circular: circular / drag only
- */
 export class InputController implements IInputController {
   private scene: Phaser.Scene;
   private onFlip: FlipHandler;
   private settings: FlipSettings;
   private enabled = false;
 
-  // swipe / drag state
   private pointerDownAt = 0;
   private pointerStart: { x: number; y: number } | null = null;
   private pointerTrail: { x: number; y: number; t: number }[] = [];
@@ -84,17 +65,21 @@ export class InputController implements IInputController {
   private circleAngleTotal = 0;
   private lastAngle: number | null = null;
   private circleCenter: { x: number; y: number } | null = null;
+  private circleSamples: { angle: number; t: number }[] = [];
 
   // motion state
   private lastMotionAt = 0;
   private motionPeak = 0;
+  private motionRotPeak = 0;
   private motionArmedAt = 0;
   private boundMotion = (e: DeviceMotionEvent) => this.handleMotion(e);
 
   // steering state
-  private deviceTilt = 0; // smoothed, -1..1
+  private deviceTilt = 0;
   private keyLeft = false;
   private keyRight = false;
+  private launchMarkAt = -1; // performance.now() of the last launch
+  private lastPointerDownAt = -1;
 
   constructor(scene: Phaser.Scene, settings: FlipSettings, onFlip: FlipHandler) {
     this.scene = scene;
@@ -113,17 +98,6 @@ export class InputController implements IInputController {
     scene.input.keyboard?.on('keyup-A', () => (this.keyLeft = false), this);
     scene.input.keyboard?.on('keydown-D', () => (this.keyRight = true), this);
     scene.input.keyboard?.on('keyup-D', () => (this.keyRight = false), this);
-  }
-
-  getTilt(): number {
-    if (this.keyLeft || this.keyRight) {
-      return (this.keyRight ? 1 : 0) - (this.keyLeft ? 1 : 0);
-    }
-    const pointer = this.scene.input.activePointer;
-    if (pointer && pointer.isDown) {
-      return clampDrift((pointer.x - GAME.WIDTH / 2) / (GAME.WIDTH / 2 - 120));
-    }
-    return this.deviceTilt;
   }
 
   setSettings(s: FlipSettings): void {
@@ -152,21 +126,38 @@ export class InputController implements IInputController {
     return this.charge;
   }
 
-  // ---- keyboard (desktop testing / accessibility) ----
-  private onSpace(): void {
-    if (!this.enabled) return;
-    this.emit({ power: 0.62, spin: 0.5, drift: 0, source: 'keyboard' });
+  markLaunch(): void {
+    this.launchMarkAt = performance.now();
   }
 
-  // ---- pointer: swipe + circular + drag ----
+  getTilt(): number {
+    if (this.keyLeft || this.keyRight) {
+      return (this.keyRight ? 1 : 0) - (this.keyLeft ? 1 : 0);
+    }
+    const pointer = this.scene.input.activePointer;
+    // Pointer steering only while flying AND the pointer went down AFTER launch.
+    if (pointer && pointer.isDown && this.lastPointerDownAt > this.launchMarkAt && this.launchMarkAt >= 0) {
+      return clampDrift((pointer.x - GAME.WIDTH / 2) / (GAME.WIDTH / 2 - 120));
+    }
+    return this.deviceTilt;
+  }
+
+  private onSpace(): void {
+    if (!this.enabled) return;
+    if (!import.meta.env.DEV) return; // testing only
+    this.emit({ power: 0.62, spin: 0.5, spinDir: 1, drift: 0, source: 'keyboard' });
+  }
+
   private onPointerDown(p: Phaser.Input.Pointer): void {
     if (!this.enabled) return;
     this.pointerDownAt = this.scene.time.now;
+    this.lastPointerDownAt = performance.now();
     this.pointerStart = { x: p.x, y: p.y };
     this.pointerTrail = [{ x: p.x, y: p.y, t: this.pointerDownAt }];
     this.circleCenter = { x: p.x, y: p.y };
     this.circleAngleTotal = 0;
     this.lastAngle = null;
+    this.circleSamples = [];
     this.charge = 0;
   }
 
@@ -174,11 +165,9 @@ export class InputController implements IInputController {
     if (!this.enabled || !p.isDown || !this.pointerStart) return;
     const now = this.scene.time.now;
     this.pointerTrail.push({ x: p.x, y: p.y, t: now });
-    if (this.pointerTrail.length > 40) this.pointerTrail.shift();
+    if (this.pointerTrail.length > 60) this.pointerTrail.shift();
 
-    // Circular tracking: angle around the moving centroid of the trail.
     if (this.circleCenter) {
-      // Centre drifts toward the centroid so small circles still register.
       this.circleCenter.x = this.circleCenter.x * 0.92 + p.x * 0.08;
       this.circleCenter.y = this.circleCenter.y * 0.92 + p.y * 0.08;
       const ang = Math.atan2(p.y - this.circleCenter.y, p.x - this.circleCenter.x);
@@ -189,11 +178,12 @@ export class InputController implements IInputController {
         this.circleAngleTotal += d;
       }
       this.lastAngle = ang;
+      this.circleSamples.push({ angle: this.circleAngleTotal, t: now });
+      if (this.circleSamples.length > 40) this.circleSamples.shift();
     }
 
-    // Live charge meter: prefer swipe distance, fall back to loops.
     const dy = this.pointerStart.y - p.y;
-    const swipeCharge = clamp01(dy / 320);
+    const swipeCharge = clamp01(dy / INPUT.SWIPE_FULL_DISTANCE);
     const loopCharge = clamp01(Math.abs(this.circleAngleTotal) / (Math.PI * 2 * INPUT.CIRCLE_IDEAL_LOOPS));
     this.charge = Math.max(swipeCharge, loopCharge);
   }
@@ -201,7 +191,6 @@ export class InputController implements IInputController {
   private onPointerUp(p: Phaser.Input.Pointer): void {
     if (!this.enabled || !this.pointerStart) return;
     const now = this.scene.time.now;
-    const dt = Math.max(16, now - this.pointerDownAt) / 1000;
     const dx = p.x - this.pointerStart.x;
     const dy = this.pointerStart.y - p.y; // up = positive
     const dist = Math.hypot(dx, dy);
@@ -214,44 +203,74 @@ export class InputController implements IInputController {
       (mode === 'circular' || mode === 'auto') && loops >= INPUT.CIRCLE_MIN_LOOPS && dist < 260;
 
     if (isCircular) {
-      const angularSpeed = Math.abs(this.circleAngleTotal) / dt; // rad/s
-      const power = clamp01(0.35 + loops / INPUT.CIRCLE_IDEAL_LOOPS * 0.45 + angularSpeed / 28 * 0.3);
-      const spinDir = this.circleAngleTotal >= 0 ? 1 : -1;
-      const spin = clamp01(loops / INPUT.CIRCLE_IDEAL_LOOPS) * (spinDir >= 0 ? 1 : 0.85);
-      this.emit({ power: this.applySensitivity(power), spin, drift: clampDrift(dx / 300), source: 'circular' });
+      // spin = loops; power = how fast the last loop was drawn (~last 250ms).
+      const cutoff = now - 250;
+      const recent = this.circleSamples.filter((s) => s.t >= cutoff);
+      let angularSpeed = 0;
+      if (recent.length >= 2) {
+        const first = recent[0];
+        const last = recent[recent.length - 1];
+        const dt = Math.max(30, last.t - first.t) / 1000;
+        angularSpeed = Math.abs(last.angle - first.angle) / dt;
+      }
+      const power = clamp01(angularSpeed / INPUT.CIRCLE_FAST_RAD_PER_S);
+      const spin = clamp01(loops / INPUT.CIRCLE_IDEAL_LOOPS);
+      this.emit({
+        power: this.applySensitivity(power),
+        spin,
+        spinDir: this.circleAngleTotal >= 0 ? 1 : -1,
+        drift: clampDrift(dx / 300),
+        source: 'circular',
+      });
       return;
     }
 
-    // Swipe / drag-up fallback
-    if ((mode === 'swipe' || mode === 'motion' || mode === 'auto' || mode === 'circular') && dy > INPUT.SWIPE_MIN_DISTANCE) {
-      const speed = dy / dt / 1000; // px per ms → scaled below
-      const speedPxPerSec = dy / dt;
-      const powerRaw = (speedPxPerSec / 1000 - INPUT.SWIPE_POWER_MIN_SPEED) /
-        (INPUT.SWIPE_POWER_MAX_SPEED - INPUT.SWIPE_POWER_MIN_SPEED);
-      const power = clamp01(powerRaw);
-      // Faster flicks spin more; a slow drag gives a gentle single flip.
-      const spin = clamp01(0.3 + power * 0.55);
-      void speed;
-      this.emit({ power: this.applySensitivity(power), spin, drift: clampDrift(dx / 260), source: dy > 140 ? 'swipe' : 'drag' });
+    // Swipe / drag-up: POWER = length of the upward travel,
+    // SPIN = release speed over the last 70ms of the trail.
+    if (dy > INPUT.SWIPE_MIN_DISTANCE) {
+      const power = clamp01((dy - INPUT.SWIPE_MIN_DISTANCE) / INPUT.SWIPE_FULL_DISTANCE);
+      let releaseSpeed = 0;
+      const cutoff = now - 70;
+      const recent = this.pointerTrail.filter((pt) => pt.t >= cutoff);
+      if (recent.length >= 2) {
+        const first = recent[0];
+        const last = recent[recent.length - 1];
+        const dt = Math.max(8, last.t - first.t);
+        releaseSpeed = Math.hypot(last.x - first.x, last.y - first.y) / dt; // px/ms
+      }
+      const spin = clamp01(
+        (releaseSpeed - INPUT.SWIPE_SPIN_MIN_SPEED) / INPUT.SWIPE_SPIN_SPEED_RANGE,
+      );
+      this.emit({
+        power: this.applySensitivity(power),
+        spin,
+        spinDir: 1,
+        drift: clampDrift(dx / 260),
+        source: dy > 140 ? 'swipe' : 'drag',
+      });
     }
   }
 
-  // ---- DeviceMotion: upward flick = acceleration spike ----
   private handleMotion(e: DeviceMotionEvent): void {
     if (!this.enabled) return;
     const a = e.accelerationIncludingGravity;
     if (!a || a.x == null || a.y == null || a.z == null) return;
-    // Tilt steering updates in EVERY mode (it's steering, not flipping).
-    // Portrait play: gravity X ≈ -9.8 (tilt left) .. +9.8 (tilt right).
+    // Tilt steering updates in EVERY mode.
     const tiltTarget = clampDrift(a.x / 6.5);
     this.deviceTilt = this.deviceTilt * 0.72 + tiltTarget * 0.28;
-    if (Math.abs(this.deviceTilt) < 0.04) this.deviceTilt = 0; // deadzone
+    if (Math.abs(this.deviceTilt) < 0.04) this.deviceTilt = 0;
 
     if (this.settings.controlMode === 'swipe' || this.settings.controlMode === 'circular') return;
     const mag = Math.hypot(a.x, a.y, a.z);
     const now = performance.now();
-    // Resting magnitude ≈ 9.8. A flick spikes well above it.
     const excess = mag - 9.8;
+
+    // Track peak wrist-snap rotation during the spike window.
+    const rr = e.rotationRate;
+    if (rr) {
+      const snap = Math.max(Math.abs(rr.alpha ?? 0), Math.abs(rr.beta ?? 0));
+      if (excess > 4) this.motionRotPeak = Math.max(this.motionRotPeak, snap);
+    }
 
     if (excess > 4) {
       if (now - this.motionArmedAt > 350) {
@@ -273,11 +292,11 @@ export class InputController implements IInputController {
         (this.motionPeak - INPUT.MOTION_SPIKE_THRESHOLD) /
           (INPUT.MOTION_SPIKE_MAX - INPUT.MOTION_SPIKE_THRESHOLD),
       );
-      const rot = e.rotationRate?.beta ?? 180;
-      const spin = clamp01(0.3 + Math.abs(rot) / 700);
+      const spin = clamp01(this.motionRotPeak / INPUT.MOTION_ROT_MAX);
       const drift = clampDrift((a.x ?? 0) / 18);
       this.motionPeak = 0;
-      this.emit({ power: this.applySensitivity(0.25 + power * 0.75), spin, drift, source: 'motion' });
+      this.motionRotPeak = 0;
+      this.emit({ power: this.applySensitivity(0.25 + power * 0.75), spin, spinDir: 1, drift, source: 'motion' });
     }
   }
 

@@ -1,7 +1,8 @@
 import { DIFFICULTY, PANCAKE } from '../config';
+import { loadTuning } from '../utils/tuning';
 
-/** Deterministic seeded RNG (mulberry32). Seed = stack height, so the
- *  pancake at height N is ALWAYS the same size — fair and learnable. */
+/** Deterministic seeded RNG (mulberry32). Seed = f(height, run seed), so
+ *  the pancake at height N of a given run/day is ALWAYS identical. */
 export function seededRandom(seed: number): number {
   let t = (seed * 2654435761) >>> 0;
   t += 0x6d2b79f5;
@@ -17,54 +18,47 @@ export interface PancakeSpec {
 
 export interface DifficultyState {
   height: number;
-  swayForce: number; // horizontal force amplitude this flight
-  windForce: number; // signed; HUD shows direction when non-zero
+  windForce: number;
   windDirection: -1 | 0 | 1;
   spec: PancakeSpec;
 }
 
 /**
  * Difficulty ramps ONLY with height, on a fixed schedule — never random.
- * The player can learn: "wind blows left for 3, then right for 3…"
+ * The stack sway that used to be a flight force now lives in GameScene
+ * (the stack itself sways; see LEAN in config).
  */
 export class DifficultyManager {
+  /** Run seed: 0 for endless, YYYYMMDD for Daily Stack. */
+  runSeed = 0;
+
   stateForHeight(height: number): DifficultyState {
     const spec = this.specForHeight(height);
-
-    let swayForce = 0;
-    if (height >= DIFFICULTY.SWAY_START) {
-      const t = Math.min(1, (height - DIFFICULTY.SWAY_START + 1) / 10);
-      swayForce = DIFFICULTY.SWAY_MAX_FORCE * t;
-    }
 
     let windForce = 0;
     let windDirection: -1 | 0 | 1 = 0;
     if (height >= DIFFICULTY.WIND_START) {
       const phase = Math.floor((height - DIFFICULTY.WIND_START) / DIFFICULTY.WIND_PATTERN_EVERY);
-      windDirection = phase % 2 === 0 ? 1 : -1;
+      // Daily seed flips the starting direction so days differ, still fixed per day.
+      const startDir = this.runSeed === 0 ? 1 : seededRandom(this.runSeed) > 0.5 ? 1 : -1;
+      windDirection = (phase % 2 === 0 ? startDir : -startDir) as -1 | 1;
       const t = Math.min(1, (height - DIFFICULTY.WIND_START + 1) / 8);
-      windForce = windDirection * DIFFICULTY.WIND_MAX_FORCE * t;
+      windForce = windDirection * loadTuning().WIND_MAX_FORCE * t;
     }
 
-    return { height, swayForce, windForce, windDirection, spec };
+    return { height, windForce, windDirection, spec };
   }
 
   specForHeight(height: number): PancakeSpec {
     if (height < DIFFICULTY.SIZE_VAR_START) {
       return { radius: PANCAKE.BASE_RADIUS, thickness: PANCAKE.BASE_THICKNESS };
     }
-    const r1 = seededRandom(height * 2 + 11);
-    const r2 = seededRandom(height * 2 + 12);
+    const base = this.runSeed * 1000 + height;
+    const r1 = seededRandom(base * 2 + 11);
+    const r2 = seededRandom(base * 2 + 12);
     return {
       radius: PANCAKE.BASE_RADIUS + Math.round((r1 * 2 - 1) * PANCAKE.RADIUS_VARIATION),
       thickness: PANCAKE.BASE_THICKNESS + Math.round((r2 * 2 - 1) * PANCAKE.THICKNESS_VARIATION),
     };
-  }
-
-  /** Sway phase for a given time — pure function, shared by physics + visuals. */
-  swayAt(timeMs: number, height: number): number {
-    const { swayForce } = this.stateForHeight(height);
-    if (swayForce === 0) return 0;
-    return Math.sin((timeMs / DIFFICULTY.SWAY_PERIOD_MS) * Math.PI * 2) * swayForce;
   }
 }
