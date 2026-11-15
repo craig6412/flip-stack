@@ -9,10 +9,18 @@ import { ScoreSystem } from '../systems/ScoreSystem';
 import { DifficultyManager } from '../systems/DifficultyManager';
 import { loadTuning } from '../utils/tuning';
 import { DebugOverlay } from '../utils/debugOverlay';
+import { haptics } from '../utils/haptics';
 import { sfx } from '../utils/sound';
 import { FONT } from '../utils/ui';
 
-type Phase = 'ready' | 'flying' | 'resolving' | 'over';
+type Phase = 'ready' | 'flying' | 'resolving' | 'over' | 'replay';
+
+interface ReplayFrame {
+  x: number;
+  y: number;
+  rot: number;
+  topX: number;
+}
 
 export interface GameStartData {
   mode?: 'endless' | 'daily';
@@ -47,6 +55,15 @@ export class GameScene extends Phaser.Scene {
   private lastFlipInfo = '—';
   private lastLandingInfo = '—';
   private lastFlipInput: FlipInput | null = null;
+
+  // Phase 2 juice / replay state
+  private trail: Phaser.GameObjects.Particles.ParticleEmitter | null = null;
+  private hitStopMs = 0;
+  private replayFrames: ReplayFrame[] = [];
+  private replayIndex = 0;
+  private replayLabel: Phaser.GameObjects.Text | null = null;
+  private pendingGameOver: Record<string, unknown> | null = null;
+  private decorations: { obj: Phaser.GameObjects.Image; pancake: Pancake }[] = [];
 
   // HUD
   private scoreText!: Phaser.GameObjects.Text;
@@ -115,6 +132,23 @@ export class GameScene extends Phaser.Scene {
 
     this.debugOverlay = new DebugOverlay();
     this.debugOverlay.onDeterminismTest = () => this.runDeterminismCheck();
+
+    // Motion trail for the flying pancake (visual only).
+    this.trail = this.add.particles(0, 0, 'spark', {
+      speed: 8,
+      lifespan: 300,
+      quantity: 1,
+      frequency: 28,
+      scale: { start: 0.55, end: 0 },
+      alpha: { start: 0.32, end: 0 },
+      tint: 0xf2b544,
+      emitting: false,
+    });
+    this.trail.setDepth(9);
+    this.replayFrames = [];
+    this.decorations = [];
+    this.hitStopMs = 0;
+    this.pendingGameOver = null;
 
     this.matter.world.on('collisionstart', this.onCollisionStart, this);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
@@ -194,6 +228,12 @@ export class GameScene extends Phaser.Scene {
 
   // ---------------------------------------------------------- main loop
   update(_time: number, delta: number): void {
+    // Hit-stop (perfect landings): freeze the sim briefly, keep rendering.
+    if (this.hitStopMs > 0) {
+      this.hitStopMs -= delta;
+      this.renderUpdate(delta);
+      return;
+    }
     this.acc += Math.min(delta, 250);
     let steps = 0;
     while (this.acc >= PHYSICS.FIXED_STEP_MS && steps < PHYSICS.MAX_STEPS_PER_FRAME) {
@@ -256,6 +296,15 @@ export class GameScene extends Phaser.Scene {
 
     p.trackRotation();
 
+    // Replay recording: flying pancake + top-of-stack x, every fixed step.
+    this.replayFrames.push({
+      x: p.x,
+      y: p.y,
+      rot: p.rotation,
+      topX: this.stack.length ? this.stack[this.stack.length - 1].x : STACK.CENTER_X,
+    });
+    if (this.replayFrames.length > 200) this.replayFrames.shift();
+
     if (p.y > this.stackTopY + PHYSICS.FALL_MARGIN_Y || Math.abs(p.x - STACK.CENTER_X) > 430) {
       this.lose('It slid off the stack! 🥞💨');
       return;
@@ -283,7 +332,16 @@ export class GameScene extends Phaser.Scene {
 
   /** Visual-only work: camera, meters, HUD, pan, debug feed. */
   private renderUpdate(delta: number): void {
-    void delta;
+    // 2.5D visuals follow their bodies.
+    if (this.phase !== 'replay') {
+      this.current?.syncVisual();
+      for (const s of this.stack) s.syncVisual();
+      for (const d of this.decorations) {
+        d.obj.setPosition(d.pancake.x, d.pancake.y - d.pancake.spec.thickness / 2 - 8);
+      }
+    } else {
+      this.advanceReplay(delta);
+    }
     this.meterFill.clear();
     const charge = this.inputCtl?.getCharge() ?? 0;
     if (charge > 0.02) {
@@ -332,9 +390,7 @@ export class GameScene extends Phaser.Scene {
     this.phase = 'ready';
     sfx.sizzle();
     this.updateHUD(diff.windDirection, diff.windForce);
-
-    pancake.setPosition(STACK.CENTER_X, y - 26);
-    this.tweens.add({ targets: pancake, y, duration: 180, ease: 'Quad.easeOut' });
+    pancake.squash(0.16);
   }
 
   /** Launch math shared by real flips and the determinism check. */
@@ -362,6 +418,11 @@ export class GameScene extends Phaser.Scene {
       `p=${input.power.toFixed(2)} s=${input.spin.toFixed(2)} flips=${flipsAtRef.toFixed(2)} vy=${vy.toFixed(1)} ω=${angular.toFixed(3)} (${input.source})`;
     p.launch(vx, vy, angular);
     sfx.whoosh(Math.abs(angular));
+    this.replayFrames = [];
+    if (this.trail) {
+      this.trail.startFollow(p.visual);
+      this.trail.start();
+    }
 
     this.tweens.add({
       targets: this.pan, y: this.pan.y + 90, angle: 14, alpha: 0, duration: 260, ease: 'Quad.easeIn',
@@ -390,6 +451,7 @@ export class GameScene extends Phaser.Scene {
     const p = this.current;
     if (!p || this.phase !== 'flying') return;
     this.phase = 'resolving';
+    this.trail?.stop();
 
     const dx = p.x - this.targetX;
     const result = this.score.evaluate({
@@ -414,6 +476,7 @@ export class GameScene extends Phaser.Scene {
 
     p.squash(result.perfect ? 0.34 : 0.22);
     sfx.plop(result.perfect, this.score.combo);
+    if (result.perfect) haptics.perfect(); else haptics.land();
     p.settleIntoStack(result.perfect, STACK.CENTER_X);
 
     if (result.sloppy) {
@@ -422,7 +485,9 @@ export class GameScene extends Phaser.Scene {
       p.baseX += dir * LEAN.SLOPPY_EXTRA_PX;
       p.setPosition(p.baseX, p.y);
       this.showFloatingText(p.x, p.y - 70, 'Sloppy!', '#B7791F', 30);
-      this.tweens.add({ targets: p, angle: '+=3', duration: 300, yoyo: true, repeat: 1, ease: 'Sine.easeInOut' });
+      // Teeter: visual wobble that decays (body stays put).
+      p.teeter = 0.09;
+      this.tweens.add({ targets: p, teeter: 0, duration: 320, ease: 'Sine.easeOut' });
     }
 
     this.stack.push(p);
@@ -431,11 +496,16 @@ export class GameScene extends Phaser.Scene {
     this.lean = p.baseX - STACK.CENTER_X;
 
     if (result.perfect) {
+      this.hitStopMs = 60;
       this.cameras.main.shake(110, 0.0045);
-      this.burstParticles(p.x, p.y);
+      this.burstParticles(p.x, p.y, 16 + Math.min(24, this.score.combo * 4));
       this.showFloatingText(p.x, p.y - 70, `PERFECT! +${result.points}`, '#E56F1F', 40);
       if (result.comboMultiplier > 1) {
         this.showFloatingText(p.x, p.y - 118, `COMBO ×${result.comboMultiplier.toFixed(1)}`, '#D94F04', 30);
+      }
+      if (this.score.combo === 3 || this.score.combo === 5 || this.score.combo === 10) {
+        this.showFloatingText(STACK.CENTER_X, p.y - 190, 'ON FIRE 🔥', '#E23E22', 46);
+        this.cameras.main.flash(120, 255, 180, 90);
       }
       // Reward: pull the top of the stack back toward centre (via baseX).
       for (let i = Math.max(0, this.stack.length - 3); i < this.stack.length; i++) {
@@ -454,6 +524,7 @@ export class GameScene extends Phaser.Scene {
     if (Math.abs(this.lean) <= LEAN.WARN_PX) this.creakPlayed = false;
 
     this.updateHUD();
+    this.addMilestoneDecor(p);
 
     if (Math.abs(this.lean) > LEAN.MAX_PX) {
       this.toppleStack(p);
@@ -462,6 +533,30 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.time.delayedCall(340, () => this.spawnPancake());
+  }
+
+  /** Milestone toppings + syrup drips — visible goals on the tower. */
+  private addMilestoneDecor(top: Pancake): void {
+    const h = this.stackHeight;
+    const toppings: Record<number, string> = {
+      10: 'topping_blueberry',
+      20: 'topping_strawberry',
+      30: 'topping_cream',
+      50: 'topping_cherry',
+    };
+    if (toppings[h]) {
+      const obj = this.add.image(top.x, top.y - top.spec.thickness / 2 - 8, toppings[h]).setDepth(12);
+      obj.setScale(1.15);
+      this.decorations.push({ obj, pancake: top });
+      this.showFloatingText(top.x, top.y - 120, h === 50 ? '🍒 50!' : `Milestone: ${h}!`, '#D94F04', 32);
+    }
+    if (h > 0 && h % 10 === 0) {
+      for (let i = 0; i < 3; i++) {
+        const drip = this.add.image(top.x - 40 + i * 38, top.y - 4, 'syrup').setDepth(11);
+        this.tweens.add({ targets: drip, y: drip.y + 16 + i * 5, duration: 900, ease: 'Quad.easeIn' });
+        this.decorations.push({ obj: drip, pancake: top });
+      }
+    }
   }
 
   private toppleStack(falling: Pancake): void {
@@ -476,27 +571,73 @@ export class GameScene extends Phaser.Scene {
   }
 
   private lose(reason: string): void {
-    if (this.phase === 'over') return;
-    this.phase = 'over';
+    if (this.phase === 'over' || this.phase === 'replay') return;
     this.score.onMiss();
     sfx.thud();
+    haptics.fail();
+    this.trail?.stop();
     this.inputCtl?.disable();
 
     const previousBest = loadBest();
     const isNewBest = this.score.total > previousBest;
     if (isNewBest) saveBest(this.score.total);
 
-    this.time.delayedCall(950, () => {
-      this.scene.start('GameOver', {
-        score: this.score.total,
-        height: this.stackHeight,
-        bestCombo: this.bestComboSeen,
-        perfects: this.score.perfects,
-        reason,
-        isNewBest,
-        mode: this.mode,
-      });
+    this.pendingGameOver = {
+      score: this.score.total,
+      height: this.stackHeight,
+      bestCombo: this.bestComboSeen,
+      perfects: this.score.perfects,
+      reason,
+      isNewBest,
+      mode: this.mode,
+    };
+    this.startReplay();
+  }
+
+  /** Slow-mo replay of the last ~1.2s of flight, then Game Over. Tap skips. */
+  private startReplay(): void {
+    const frames = this.replayFrames.slice(-72);
+    if (frames.length < 12 || !this.current) {
+      this.finishToGameOver();
+      return;
+    }
+    this.replayFrames = frames;
+    this.replayIndex = 0;
+    this.phase = 'replay';
+    this.replayLabel = this.add
+      .text(GAME.WIDTH / 2, 120, '↺ REPLAY', { fontFamily: FONT, fontSize: '34px', color: '#E56F1F', fontStyle: 'bold', stroke: '#FFFFFF', strokeThickness: 6 })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(120);
+    this.input.once('pointerdown', () => {
+      if (this.phase === 'replay') this.finishToGameOver();
     });
+  }
+
+  private advanceReplay(delta: number): void {
+    const p = this.current;
+    if (!p) return this.finishToGameOver();
+    this.replayIndex += (delta / PHYSICS.FIXED_STEP_MS) * 0.4; // 0.4x speed
+    const idx = Math.floor(this.replayIndex);
+    if (idx >= this.replayFrames.length) return this.finishToGameOver();
+    const f = this.replayFrames[idx];
+    p.visual.setPosition(f.x, f.y);
+    p.visual.setRotation(f.rot);
+    const c = Math.cos(f.rot);
+    p.visual.setTexture(c >= 0 ? p.skinTop : p.skinBottom);
+    const faceH = p.spec.thickness + 12 + 18 * Math.abs(c);
+    p.visual.setDisplaySize(p.spec.radius * 2 + 14, faceH);
+    for (const s of this.stack) s.syncVisual();
+  }
+
+  private finishToGameOver(): void {
+    if (this.phase === 'over') return;
+    this.phase = 'over';
+    this.replayLabel?.destroy();
+    this.replayLabel = null;
+    const data = this.pendingGameOver ?? {};
+    this.pendingGameOver = null;
+    this.scene.start('GameOver', data);
   }
 
   // ---------------------------------------------------------- determinism check (dev)
@@ -591,17 +732,17 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
-  private burstParticles(x: number, y: number): void {
+  private burstParticles(x: number, y: number, count = 16): void {
     const emitter = this.add.particles(x, y, 'spark', {
       speed: { min: 90, max: 260 },
       angle: { min: 0, max: 360 },
       lifespan: 520,
-      quantity: 16,
+      quantity: count,
       scale: { start: 1, end: 0 },
       emitting: false,
     });
     emitter.setDepth(60);
-    emitter.explode(16);
+    emitter.explode(count);
     this.time.delayedCall(700, () => emitter.destroy());
   }
 }

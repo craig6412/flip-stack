@@ -4,6 +4,13 @@ import type { PancakeSpec } from '../systems/DifficultyManager';
 
 export type PancakeState = 'in-pan' | 'flying' | 'settling' | 'stacked' | 'lost';
 
+/**
+ * Physics body (this Matter image, invisible) + a separate VISUAL sprite
+ * that fakes 3D: golden top face when face-up, pale bottom when flipped,
+ * thin when edge-on. Collisions stay honest (in-plane rectangle); only
+ * the rendering pretends to be 3D. See PANCAKE_VISUAL_MODE in config —
+ * a rotation sprite sheet can replace the texture swap later.
+ */
 export class Pancake extends Phaser.Physics.Matter.Image {
   spec: PancakeSpec;
   state: PancakeState = 'in-pan';
@@ -12,10 +19,16 @@ export class Pancake extends Phaser.Physics.Matter.Image {
   slowSince = -1;
   touchingStack = false;
   firstTouchAt = -1;
-  /** Rotation at the moment of first contact — landings are judged on this. */
   angleAtContact = 0;
-  /** Settled centre x (before sway). The sway loop offsets from here. */
   baseX = 0;
+  /** Extra visual wobble (rad) for sloppy-landing teeter; decays via tween. */
+  teeter = 0;
+  /** Squash/stretch pulse multipliers, read by syncVisual every frame. */
+  pulseX = 1;
+  pulseY = 1;
+  visual!: Phaser.GameObjects.Image;
+  skinTop = 'pancake_top';
+  skinBottom = 'pancake_bottom';
 
   constructor(scene: Phaser.Scene, x: number, y: number, spec: PancakeSpec) {
     super(scene.matter.world, x, y, 'pancake_top');
@@ -32,11 +45,23 @@ export class Pancake extends Phaser.Physics.Matter.Image {
       chamfer: { radius: Math.min(PHYSICS.PANCAKE_CHAMFER, h / 2 - 1) },
       label: 'pancake',
     });
-    this.setDisplaySize(w + 14, h + 12);
+    this.setVisible(false); // body is physics-only; `visual` renders
+    this.visual = scene.add.image(x, y, this.skinTop).setDepth(10);
+    this.syncVisual();
     this.setStatic(true);
-    this.setDepth(10);
     this.lastAngle = this.rotation;
     this.baseX = x;
+  }
+
+  /** Call every render frame. Face thickness swells when flat, thins edge-on. */
+  syncVisual(): void {
+    if (!this.visual || !this.visual.scene) return;
+    const c = Math.cos(this.rotation);
+    this.visual.setPosition(this.x, this.y);
+    this.visual.setRotation(this.rotation + this.teeter);
+    this.visual.setTexture(c >= 0 ? this.skinTop : this.skinBottom);
+    const faceH = this.spec.thickness + 12 + 18 * Math.abs(c);
+    this.visual.setDisplaySize((this.spec.radius * 2 + 14) * this.pulseX, faceH * this.pulseY);
   }
 
   get angularVel(): number {
@@ -47,6 +72,7 @@ export class Pancake extends Phaser.Physics.Matter.Image {
     this.state = 'flying';
     this.totalRotation = 0;
     this.lastAngle = this.rotation;
+    this.teeter = 0;
     this.setStatic(false);
     this.setVelocity(vx, vy);
     this.setAngularVelocity(angularVelocity);
@@ -92,16 +118,23 @@ export class Pancake extends Phaser.Physics.Matter.Image {
     this.setStatic(true);
     this.state = 'stacked';
     this.baseX = this.x;
+    this.syncVisual();
   }
 
   squash(amount = 0.28): void {
+    this.pulseY = 1 - amount;
+    this.pulseX = 1 + amount * 0.6;
     this.scene.tweens.add({
       targets: this,
-      scaleY: this.scaleY * (1 - amount),
-      scaleX: this.scaleX * (1 + amount * 0.6),
-      duration: 90,
-      yoyo: true,
+      pulseY: 1,
+      pulseX: 1,
+      duration: 170,
       ease: 'Quad.easeOut',
     });
+  }
+
+  destroy(fromScene?: boolean): void {
+    this.visual?.destroy();
+    super.destroy(fromScene);
   }
 }

@@ -88,7 +88,34 @@ export class SettingsScene extends Phaser.Scene {
       updateSound();
     });
 
-    makeButton(this, cx, 1080, '← Back', {
+    // --- Volume slider ---
+    bodyText(this, cx, 930, 'Volume', 32);
+    const volValue = bodyText(this, cx, 972, '', 26, '#E56F1F');
+    const vTrackX = cx - 240;
+    const vTrackW = 480;
+    const vTrackY = 1020;
+    const vTrack = this.add.graphics();
+    vTrack.fillStyle(0xe8d9b8, 1);
+    vTrack.fillRoundedRect(vTrackX, vTrackY - 10, vTrackW, 20, 10);
+    const vFill = this.add.graphics();
+    const vKnob = this.add.circle(cx, vTrackY, 26, COLORS.orange).setStrokeStyle(4, 0xffffff).setInteractive({ useHandCursor: true, draggable: true });
+    this.input.setDraggable(vKnob);
+    const renderVol = () => {
+      vKnob.x = vTrackX + this.settings.volume * vTrackW;
+      vFill.clear();
+      vFill.fillStyle(COLORS.orange, 1);
+      vFill.fillRoundedRect(vTrackX, vTrackY - 10, this.settings.volume * vTrackW, 20, 10);
+      volValue.setText(`${Math.round(this.settings.volume * 100)}%`);
+    };
+    renderVol();
+    vKnob.on('drag', (_p: Phaser.Input.Pointer, dragX: number) => {
+      this.settings.volume = Math.round(Phaser.Math.Clamp((dragX - vTrackX) / vTrackW, 0, 1) * 20) / 20;
+      sfx.volume = this.settings.volume;
+      renderVol();
+    });
+    vKnob.on('dragend', () => saveSettings(this.settings));
+
+    makeButton(this, cx, 1120, '← Back', {
       width: 280, height: 76, fill: 0x8a5a2b,
       onTap: () => { saveSettings(this.settings); sfx.click(); this.scene.start('Title'); },
     });

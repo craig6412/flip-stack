@@ -14,7 +14,35 @@ export class BootScene extends Phaser.Scene {
     this.makePanTexture();
     this.makePlateTexture();
     this.makeParticleTexture();
+    this.makeToppingTextures();
     this.scene.start('Title');
+  }
+
+  private makeToppingTextures(): void {
+    const g = this.add.graphics();
+    // blueberry
+    g.fillStyle(0x3b4a8c, 1); g.fillCircle(16, 16, 13);
+    g.fillStyle(0x5a6fc0, 1); g.fillCircle(12, 11, 5);
+    g.generateTexture('topping_blueberry', 32, 32); g.clear();
+    // strawberry
+    g.fillStyle(0xe23e4e, 1); g.fillEllipse(16, 19, 24, 24);
+    g.fillStyle(0x58b368, 1); g.fillTriangle(6, 8, 26, 8, 16, 15);
+    g.fillStyle(0xffffff, 0.8); g.fillCircle(12, 17, 2); g.fillCircle(20, 22, 2); g.fillCircle(15, 25, 2);
+    g.generateTexture('topping_strawberry', 32, 34); g.clear();
+    // whipped cream
+    g.fillStyle(0xffffff, 1);
+    g.fillEllipse(20, 24, 38, 16); g.fillEllipse(20, 17, 26, 14); g.fillEllipse(20, 10, 13, 11);
+    g.fillStyle(0xe8edf3, 1); g.fillEllipse(28, 25, 16, 8);
+    g.generateTexture('topping_cream', 40, 32); g.clear();
+    // cherry
+    g.fillStyle(0xc21725, 1); g.fillCircle(15, 20, 11);
+    g.fillStyle(0xff6b7a, 1); g.fillCircle(11, 16, 4);
+    g.lineStyle(3, 0x4a7c3a, 1); g.lineBetween(15, 10, 22, 2);
+    g.generateTexture('topping_cherry', 30, 32); g.clear();
+    // syrup drip blob
+    g.fillStyle(0xa05e14, 0.9); g.fillEllipse(10, 8, 18, 12); g.fillEllipse(10, 14, 7, 12);
+    g.generateTexture('syrup', 20, 22);
+    g.destroy();
   }
 
   private makePancakeTexture(): void {
