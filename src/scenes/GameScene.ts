@@ -1,8 +1,13 @@
 import Phaser from 'phaser';
 import {
-  GAME, PHYSICS, STACK, LEAN, DIFFICULTY, SCORING,
+  GAME, PHYSICS, STACK, LEAN, DIFFICULTY, SCORING, STORAGE_KEYS,
   loadBest, loadSettings, saveBest, lerp, type FlipSettings,
 } from '../config';
+import { loadProfile, saveProfile, addSyrup } from '../systems/ProfileStore';
+import { shopItem } from '../systems/shopData';
+import { ensureMissions, observeLanding, observeRunEnd, missionSummaryLines } from '../systems/Missions';
+import { todaySeed, dailyNumber } from './TitleScene';
+import { track } from '../utils/analytics';
 import { InputController, type FlipInput } from '../input/InputController';
 import { Pancake } from '../entities/Pancake';
 import { ScoreSystem } from '../systems/ScoreSystem';
@@ -65,6 +70,17 @@ export class GameScene extends Phaser.Scene {
   private pendingGameOver: Record<string, unknown> | null = null;
   private decorations: { obj: Phaser.GameObjects.Image; pancake: Pancake }[] = [];
 
+  // Phase 3 retention state
+  private runSyrup = 0;
+  private completedMissions: string[] = [];
+  private runStartedAt = 0;
+  private tutorialActive = false;
+  private tutorialStep = 0;
+  private tutorialText: Phaser.GameObjects.Text | null = null;
+  private ghostHand: Phaser.GameObjects.Text | null = null;
+  private arcGfx: Phaser.GameObjects.Graphics | null = null;
+  private plateImage: Phaser.GameObjects.Image | null = null;
+
   // HUD
   private scoreText!: Phaser.GameObjects.Text;
   private heightText!: Phaser.GameObjects.Text;
@@ -117,7 +133,8 @@ export class GameScene extends Phaser.Scene {
     this.lastFlipInfo = '—';
     this.lastLandingInfo = '—';
 
-    this.cameras.main.setBackgroundColor('#FFF3D6');
+    const bgItem = shopItem(loadProfile().equipped.bg);
+    this.cameras.main.setBackgroundColor(bgItem?.bgColors?.sky ?? '#FFF3D6');
     this.cameras.main.setBounds(0, -12000, GAME.WIDTH, GAME.HEIGHT + 12000);
     this.matter.world.setBounds(0, -12000, GAME.WIDTH, 12400, 64, false, false, false, false);
     const gravity = loadTuning().GRAVITY_Y;
@@ -149,6 +166,18 @@ export class GameScene extends Phaser.Scene {
     this.decorations = [];
     this.hitStopMs = 0;
     this.pendingGameOver = null;
+    this.runSyrup = 0;
+    this.completedMissions = [];
+    this.runStartedAt = Date.now();
+    ensureMissions(todaySeed());
+
+    // Tutorial: first run only (endless), skippable via Settings replay flag.
+    this.tutorialActive =
+      this.mode === 'endless' && !localStorage.getItem(STORAGE_KEYS.TUTORIAL_DONE);
+    this.tutorialStep = 0;
+    if (this.tutorialActive) this.setupTutorial();
+
+    track('run_start', { mode: this.mode, controlMode: this.settings.controlMode });
 
     this.matter.world.on('collisionstart', this.onCollisionStart, this);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
@@ -162,10 +191,13 @@ export class GameScene extends Phaser.Scene {
 
   // ---------------------------------------------------------- world building
   private buildBackground(): void {
+    const bgItem = shopItem(loadProfile().equipped.bg);
+    const bandA = bgItem?.bgColors?.bandA ?? 0xfff3d6;
+    const bandB = bgItem?.bgColors?.bandB ?? 0xffecc4;
     const g = this.add.graphics().setDepth(-10);
     for (let i = 0; i < 30; i++) {
       const y = STACK.PLATE_Y - i * 420;
-      g.fillStyle(i % 2 === 0 ? 0xfff3d6 : 0xffecc4, 1);
+      g.fillStyle(i % 2 === 0 ? bandA : bandB, 1);
       g.fillRect(0, y - 420, GAME.WIDTH, 420);
       g.fillStyle(0xffffff, 0.75);
       const cx = ((i * 197) % 620) + 60;
@@ -186,9 +218,13 @@ export class GameScene extends Phaser.Scene {
   }
 
   private buildPlateAndPan(): void {
+    const profile = loadProfile();
     const plate = this.add.image(STACK.CENTER_X, STACK.PLATE_Y, 'plate');
     plate.setDisplaySize(STACK.PLATE_WIDTH + 30, STACK.PLATE_HEIGHT + 14).setDepth(2);
     plate.y = STACK.PLATE_Y - 2;
+    const plateItem = shopItem(profile.equipped.plate);
+    if (plateItem?.tint) plate.setTint(plateItem.tint);
+    this.plateImage = plate;
     this.plateBody = this.matter.add.image(STACK.CENTER_X, STACK.PLATE_Y, 'plate', undefined, {
       isStatic: true,
       label: 'plate',
@@ -197,6 +233,8 @@ export class GameScene extends Phaser.Scene {
     this.plateBody.setVisible(false);
 
     this.pan = this.add.image(STACK.CENTER_X - 26, 0, 'pan').setDepth(5).setScale(0.92);
+    const panItem = shopItem(profile.equipped.pan);
+    if (panItem?.tint) this.pan.setTint(panItem.tint);
   }
 
   private buildHUD(): void {
@@ -360,6 +398,7 @@ export class GameScene extends Phaser.Scene {
     }
     this.drawTiltIndicator(this.phase === 'flying' ? this.inputCtl.getTilt() : 0);
     this.drawLeanMeter();
+    this.drawTutorialArc();
 
     this.debugOverlay?.update({
       lastFlip: this.lastFlipInfo,
@@ -386,6 +425,12 @@ export class GameScene extends Phaser.Scene {
     this.pan.setAlpha(1).setAngle(0);
 
     const pancake = new Pancake(this, STACK.CENTER_X, y, diff.spec);
+    const skin = shopItem(loadProfile().equipped.pancake);
+    if (skin?.textureTop && skin?.textureBottom) {
+      pancake.skinTop = skin.textureTop;
+      pancake.skinBottom = skin.textureBottom;
+      pancake.syncVisual();
+    }
     this.current = pancake;
     this.phase = 'ready';
     sfx.sizzle();
@@ -463,6 +508,10 @@ export class GameScene extends Phaser.Scene {
       `dx=${dx.toFixed(0)} ang=${result.angleErrorDeg.toFixed(0)}° rot=${p.fullRotations} → ${result.reason}${result.perfect ? ' PERFECT' : result.sloppy ? ' SLOPPY' : ''}`;
 
     if (!result.success) {
+      if (this.tutorialActive) {
+        this.tutorialRetry();
+        return;
+      }
       const reasons: Record<string, string> = {
         'face-down': "Face down! Syrup side's ruined.",
         'edge': 'Landed on its edge and rolled off!',
@@ -495,6 +544,26 @@ export class GameScene extends Phaser.Scene {
     this.bestComboSeen = Math.max(this.bestComboSeen, this.score.combo);
     this.lean = p.baseX - STACK.CENTER_X;
 
+    // Syrup + missions + tutorial progression.
+    this.runSyrup += result.perfect ? 3 : 1;
+    const windNow = this.difficulty.stateForHeight(this.stackHeight).windForce !== 0;
+    const doneNow = observeLanding({
+      perfect: result.perfect,
+      rotations: p.fullRotations,
+      windActive: windNow,
+      height: this.stackHeight,
+    });
+    for (const id of doneNow) {
+      if (!this.completedMissions.includes(id)) {
+        this.completedMissions.push(id);
+        this.showFloatingText(p.x, p.y - 165, '🎯 Mission complete!', '#58B368', 30);
+      }
+    }
+    if (this.tutorialActive) {
+      this.tutorialStep++;
+      this.updateTutorialStep();
+    }
+
     if (result.perfect) {
       this.hitStopMs = 60;
       this.cameras.main.shake(110, 0.0045);
@@ -526,7 +595,7 @@ export class GameScene extends Phaser.Scene {
     this.updateHUD();
     this.addMilestoneDecor(p);
 
-    if (Math.abs(this.lean) > LEAN.MAX_PX) {
+    if (!this.tutorialActive && Math.abs(this.lean) > LEAN.MAX_PX) {
       this.toppleStack(p);
       this.lose('The tower leaned too far!');
       return;
@@ -572,6 +641,10 @@ export class GameScene extends Phaser.Scene {
 
   private lose(reason: string): void {
     if (this.phase === 'over' || this.phase === 'replay') return;
+    if (this.tutorialActive) {
+      this.tutorialRetry();
+      return;
+    }
     this.score.onMiss();
     sfx.thud();
     haptics.fail();
@@ -582,6 +655,37 @@ export class GameScene extends Phaser.Scene {
     const isNewBest = this.score.total > previousBest;
     if (isNewBest) saveBest(this.score.total);
 
+    // Profile + missions + syrup settle at run end.
+    const profile = loadProfile();
+    profile.totalRuns += 1;
+    profile.totalPancakes += this.stackHeight;
+    saveProfile(profile);
+    for (const id of observeRunEnd(this.stackHeight, this.lean)) {
+      if (!this.completedMissions.includes(id)) this.completedMissions.push(id);
+    }
+    if (this.runSyrup > 0) addSyrup(this.runSyrup);
+
+    let shareText: string | undefined;
+    if (this.mode === 'daily') {
+      const key = STORAGE_KEYS.DAILY_BEST_PREFIX + todaySeed();
+      const prev = Number(localStorage.getItem(key) ?? 0) || 0;
+      if (this.score.total > prev) {
+        try { localStorage.setItem(key, String(this.score.total)); } catch { /* ignore */ }
+      }
+      const mult = Math.min(SCORING.COMBO_MAX_MULTIPLIER, 1 + this.bestComboSeen * SCORING.COMBO_STEP);
+      shareText = `Flip Stack Daily #${dailyNumber()} — 🥞 ${this.stackHeight} tall · 🔥 ${this.score.perfects} perfects · best combo ×${mult.toFixed(1)}`;
+    }
+
+    track('run_end', {
+      height: this.stackHeight,
+      score: this.score.total,
+      reason,
+      perfects: this.score.perfects,
+      durationMs: Date.now() - this.runStartedAt,
+      controlMode: this.settings.controlMode,
+      mode: this.mode,
+    });
+
     this.pendingGameOver = {
       score: this.score.total,
       height: this.stackHeight,
@@ -590,6 +694,9 @@ export class GameScene extends Phaser.Scene {
       reason,
       isNewBest,
       mode: this.mode,
+      syrupEarned: this.runSyrup,
+      missionLines: missionSummaryLines(this.completedMissions),
+      shareText,
     };
     this.startReplay();
   }
@@ -638,6 +745,88 @@ export class GameScene extends Phaser.Scene {
     const data = this.pendingGameOver ?? {};
     this.pendingGameOver = null;
     this.scene.start('GameOver', data);
+  }
+
+  // ---------------------------------------------------------- tutorial (Phase 3.1)
+  private setupTutorial(): void {
+    this.tutorialText = this.add
+      .text(GAME.WIDTH / 2, 205, '', {
+        fontFamily: FONT, fontSize: '30px', color: '#4A2C14', fontStyle: 'bold',
+        align: 'center', stroke: '#FFFFFF', strokeThickness: 5,
+      })
+      .setOrigin(0.5).setScrollFactor(0).setDepth(110);
+    this.ghostHand = this.add
+      .text(GAME.WIDTH / 2 + 60, GAME.HEIGHT - 330, '🖐️', { fontSize: '64px' })
+      .setOrigin(0.5).setScrollFactor(0).setDepth(110);
+    this.arcGfx = this.add.graphics().setDepth(3);
+    this.updateTutorialStep();
+  }
+
+  private updateTutorialStep(): void {
+    if (!this.tutorialText) return;
+    const prompts = [
+      'Flip 1 of 3: swipe LONG and slow ⬆️\nLong swipe = HIGH',
+      'Flip 2 of 3: short, FAST flick!\nFast flick = SPIN 🌀',
+      'Flip 3 of 3: match them —\nland it flat! 🎯',
+    ];
+    this.tutorialText.setText(prompts[Math.min(this.tutorialStep, 2)]);
+    track('tutorial_step', { step: this.tutorialStep });
+    if (this.ghostHand) {
+      this.tweens.killTweensOf(this.ghostHand);
+      const long = this.tutorialStep === 0;
+      this.ghostHand.setPosition(GAME.WIDTH / 2 + 60, GAME.HEIGHT - 300);
+      this.tweens.add({
+        targets: this.ghostHand,
+        y: GAME.HEIGHT - 300 - (long ? 260 : 110),
+        duration: long ? 1100 : 420,
+        yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
+      });
+      this.ghostHand.setVisible(this.tutorialStep < 2);
+    }
+    if (this.tutorialStep >= 3) this.finishTutorial();
+  }
+
+  private finishTutorial(): void {
+    try {
+      localStorage.setItem(STORAGE_KEYS.TUTORIAL_DONE, '1');
+    } catch { /* ignore */ }
+    this.tutorialActive = false;
+    this.tutorialText?.destroy();
+    this.ghostHand?.destroy();
+    this.arcGfx?.clear();
+    this.showFloatingText(STACK.CENTER_X, this.stackTopY - 160, 'Tutorial done! 🎉', '#E56F1F', 38);
+  }
+
+  /** Failed flip during the tutorial: no game over, just a tip + retry. */
+  private tutorialRetry(): void {
+    this.showFloatingText(STACK.CENTER_X, this.stackTopY - 170, 'So close — match power + spin!', '#B7791F', 30);
+    if (this.current) {
+      this.current.destroy();
+      this.current = null;
+    }
+    this.phase = 'ready';
+    this.time.delayedCall(500, () => this.spawnPancake());
+  }
+
+  /** Dotted arc preview — tutorial flip 3 ONLY. Never outside the tutorial. */
+  private drawTutorialArc(): void {
+    const g = this.arcGfx;
+    if (!g) return;
+    g.clear();
+    if (!this.tutorialActive || this.tutorialStep !== 2 || this.phase !== 'ready' || !this.current) return;
+    const { vx, vy } = this.computeLaunch({ power: 0.62, spin: 0.5, spinDir: 1, drift: 0, source: 'swipe' });
+    let x = this.current.x;
+    let y = this.current.y;
+    let v = vy;
+    const gStep = 0.278; // measured px/step^2 at gravity 1, 60fps
+    g.fillStyle(0xe56f1f, 0.55);
+    for (let i = 0; i < 150; i++) {
+      v += gStep;
+      x += vx;
+      y += v;
+      if (i % 6 === 0) g.fillCircle(x, y, 5);
+      if (y > this.stackTopY) break;
+    }
   }
 
   // ---------------------------------------------------------- determinism check (dev)

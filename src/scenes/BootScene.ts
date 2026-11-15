@@ -46,40 +46,56 @@ export class BootScene extends Phaser.Scene {
   }
 
   private makePancakeTexture(): void {
-    // TOP: golden, toasted spots, butter pat — face-up must be unmistakable.
-    const g = this.add.graphics();
+    // Palettes per skin. Identical shapes/physics — only the paint differs.
+    const skins: Record<string, { rim: number; body: number; face: number; spot: number; deco?: 'butter' | 'berries' | 'chips' | 'grid' | 'cream' }> = {
+      '': { rim: 0xb96f12, body: 0xf2b544, face: 0xffcf6b, spot: 0xd98e1e, deco: 'butter' },
+      _blueberry: { rim: 0x8a6d2f, body: 0xe0aa4e, face: 0xf5c86e, spot: 0xc78f2e, deco: 'berries' },
+      _chocolate: { rim: 0x9c6414, body: 0xeaa83f, face: 0xf7bd55, spot: 0xd98e1e, deco: 'chips' },
+      _waffle: { rim: 0xa86a1c, body: 0xe39a35, face: 0xefa845, spot: 0xc67c22, deco: 'grid' },
+      _redvelvet: { rim: 0x7e1f24, body: 0xa92c33, face: 0xbc3a41, spot: 0x8e242b, deco: 'cream' },
+    };
     const W = 200;
     const H = 48;
-    g.fillStyle(0xb96f12, 1);
-    g.fillEllipse(W / 2, H / 2 + 4, W, H - 4);
-    g.fillStyle(0xf2b544, 1);
-    g.fillEllipse(W / 2, H / 2, W, H - 6);
-    g.fillStyle(0xffcf6b, 1);
-    g.fillEllipse(W / 2, H / 2 - 4, W - 14, H - 16);
-    g.fillStyle(0xd98e1e, 0.55);
-    g.fillEllipse(W * 0.32, H * 0.42, 26, 9);
-    g.fillEllipse(W * 0.62, H * 0.36, 20, 7);
-    g.fillEllipse(W * 0.5, H * 0.55, 15, 6);
-    // butter pat
-    g.fillStyle(0xfff3a6, 1);
-    g.fillRoundedRect(W / 2 - 13, H / 2 - 13, 26, 13, 3);
-    g.fillStyle(0xffe066, 1);
-    g.fillRoundedRect(W / 2 - 13, H / 2 - 13, 26, 5, 3);
-    g.generateTexture('pancake_top', W, H);
-    g.generateTexture('pancake', W, H);
-    g.clear();
-    // BOTTOM: paler, flatter, no butter, faint spots.
-    g.fillStyle(0xcfa15c, 1);
-    g.fillEllipse(W / 2, H / 2 + 4, W, H - 4);
-    g.fillStyle(0xe8c98a, 1);
-    g.fillEllipse(W / 2, H / 2, W, H - 6);
-    g.fillStyle(0xf0d9a4, 1);
-    g.fillEllipse(W / 2, H / 2 - 3, W - 14, H - 16);
-    g.fillStyle(0xd9b878, 0.5);
-    g.fillEllipse(W * 0.4, H * 0.45, 22, 8);
-    g.fillEllipse(W * 0.66, H * 0.4, 16, 6);
-    g.generateTexture('pancake_bottom', W, H);
-    g.destroy();
+    for (const [suffix, pal] of Object.entries(skins)) {
+      const g = this.add.graphics();
+      g.fillStyle(pal.rim, 1);
+      g.fillEllipse(W / 2, H / 2 + 4, W, H - 4);
+      g.fillStyle(pal.body, 1);
+      g.fillEllipse(W / 2, H / 2, W, H - 6);
+      g.fillStyle(pal.face, 1);
+      g.fillEllipse(W / 2, H / 2 - 4, W - 14, H - 16);
+      g.fillStyle(pal.spot, 0.55);
+      g.fillEllipse(W * 0.32, H * 0.42, 26, 9);
+      g.fillEllipse(W * 0.62, H * 0.36, 20, 7);
+      if (pal.deco === 'butter' || pal.deco === 'cream') {
+        g.fillStyle(pal.deco === 'butter' ? 0xfff3a6 : 0xffffff, 1);
+        g.fillRoundedRect(W / 2 - 13, H / 2 - 13, 26, 13, 3);
+        g.fillStyle(pal.deco === 'butter' ? 0xffe066 : 0xf0f0f0, 1);
+        g.fillRoundedRect(W / 2 - 13, H / 2 - 13, 26, 5, 3);
+      } else if (pal.deco === 'berries') {
+        g.fillStyle(0x3b4a8c, 1);
+        g.fillCircle(W * 0.38, H * 0.42, 6); g.fillCircle(W * 0.55, H * 0.55, 5); g.fillCircle(W * 0.66, H * 0.38, 6); g.fillCircle(W * 0.47, H * 0.35, 4);
+      } else if (pal.deco === 'chips') {
+        g.fillStyle(0x4a2c14, 1);
+        g.fillCircle(W * 0.36, H * 0.44, 4); g.fillCircle(W * 0.52, H * 0.36, 4); g.fillCircle(W * 0.63, H * 0.52, 4); g.fillCircle(W * 0.44, H * 0.58, 3);
+      } else if (pal.deco === 'grid') {
+        g.lineStyle(3, pal.spot, 0.7);
+        for (let i = 1; i <= 3; i++) g.lineBetween((W / 4) * i, 8, (W / 4) * i, H - 8);
+        g.lineBetween(14, H / 2 - 2, W - 14, H / 2 - 2);
+      }
+      g.generateTexture(`pancake_top${suffix}`, W, H);
+      if (suffix === '') g.generateTexture('pancake', W, H);
+      g.clear();
+      // BOTTOM: paler version, no deco.
+      g.fillStyle(pal.rim, 0.75);
+      g.fillEllipse(W / 2, H / 2 + 4, W, H - 4);
+      g.fillStyle(pal.body, 0.72);
+      g.fillEllipse(W / 2, H / 2, W, H - 6);
+      g.fillStyle(0xffffff, 0.25);
+      g.fillEllipse(W / 2, H / 2 - 3, W - 14, H - 16);
+      g.generateTexture(`pancake_bottom${suffix}`, W, H);
+      g.destroy();
+    }
   }
 
   private makePanTexture(): void {

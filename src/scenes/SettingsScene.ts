@@ -115,10 +115,18 @@ export class SettingsScene extends Phaser.Scene {
     });
     vKnob.on('dragend', () => saveSettings(this.settings));
 
-    makeButton(this, cx, 1120, '← Back', {
-      width: 280, height: 76, fill: 0x8a5a2b,
+    makeButton(this, cx, 1090, '↺ Replay tutorial', {
+      width: 320, height: 56, fill: 0x4a90d9, fontSize: 24,
+      onTap: () => {
+        sfx.click();
+        try { localStorage.removeItem('flipstack.tutorialDone'); } catch { /* ignore */ }
+        bodyText(this, cx, 1132, 'Tutorial will play on your next run.', 20);
+      },
+    });
+    makeButton(this, cx, 1185, '← Back', {
+      width: 280, height: 70, fill: 0x8a5a2b,
       onTap: () => { saveSettings(this.settings); sfx.click(); this.scene.start('Title'); },
     });
-    bodyText(this, cx, 1180, 'Motion controls need HTTPS on mobile Safari.', 20);
+    bodyText(this, cx, 1242, 'Motion controls need HTTPS on mobile Safari.', 19);
   }
 }
