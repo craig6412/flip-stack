@@ -8,6 +8,8 @@ import { shopItem } from '../systems/shopData';
 import { ensureMissions, observeLanding, observeRunEnd, missionSummaryLines } from '../systems/Missions';
 import { todaySeed, dailyNumber } from './TitleScene';
 import { track } from '../utils/analytics';
+import { getPlatform } from '../platform/Platform';
+import { makeButton } from '../utils/ui';
 import { InputController, type FlipInput } from '../input/InputController';
 import { Pancake } from '../entities/Pancake';
 import { ScoreSystem } from '../systems/ScoreSystem';
@@ -80,6 +82,14 @@ export class GameScene extends Phaser.Scene {
   private ghostHand: Phaser.GameObjects.Text | null = null;
   private arcGfx: Phaser.GameObjects.Graphics | null = null;
   private plateImage: Phaser.GameObjects.Image | null = null;
+
+  // Phase 4 platform state
+  private continueUsed = false;
+  private continueOverlay: Phaser.GameObjects.Container | null = null;
+  private onVisibility = (): void => {
+    if (document.hidden) this.scene.pause();
+    else if (this.scene.isPaused()) this.scene.resume();
+  };
 
   // HUD
   private scoreText!: Phaser.GameObjects.Text;
@@ -180,13 +190,17 @@ export class GameScene extends Phaser.Scene {
     track('run_start', { mode: this.mode, controlMode: this.settings.controlMode });
 
     this.matter.world.on('collisionstart', this.onCollisionStart, this);
+    this.continueUsed = false;
+    document.addEventListener('visibilitychange', this.onVisibility);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.inputCtl?.destroy();
       this.debugOverlay?.destroy();
+      document.removeEventListener('visibilitychange', this.onVisibility);
       this.matter.world.off('collisionstart', this.onCollisionStart, this);
     });
 
     this.spawnPancake();
+    getPlatform().gameplayStart();
   }
 
   // ---------------------------------------------------------- world building
@@ -645,15 +659,106 @@ export class GameScene extends Phaser.Scene {
       this.tutorialRetry();
       return;
     }
+    // Rewarded continue: once per run, if there's a stack worth saving.
+    if (!this.continueUsed && this.stackHeight >= 2) {
+      this.showContinuePrompt(reason);
+      return;
+    }
+    this.finalizeRun(reason);
+  }
+
+  /** "Watch an ad to save your stack?" — NullPlatform grants instantly. */
+  private showContinuePrompt(reason: string): void {
+    this.phase = 'over';
     this.score.onMiss();
     sfx.thud();
     haptics.fail();
     this.trail?.stop();
     this.inputCtl?.disable();
+    if (this.current?.body) {
+      this.current.setVelocity(0, 0);
+      this.current.setAngularVelocity(0);
+      this.current.setStatic(true);
+    }
+    const overlay = this.add.container(0, 0).setDepth(200);
+    const dim = this.add.graphics();
+    dim.fillStyle(0x2a1a05, 0.55);
+    dim.fillRect(0, 0, GAME.WIDTH, GAME.HEIGHT);
+    overlay.add(dim);
+    const title = this.add
+      .text(GAME.WIDTH / 2, 430, '🥞 Save your stack?', {
+        fontFamily: FONT, fontSize: '44px', color: '#FFFFFF', fontStyle: 'bold', align: 'center',
+      })
+      .setOrigin(0.5);
+    const sub = this.add
+      .text(GAME.WIDTH / 2, 492, `${this.stackHeight} pancakes tall — watch a short ad\nand keep stacking (once per run).`, {
+        fontFamily: FONT, fontSize: '25px', color: '#FFE9B0', align: 'center',
+      })
+      .setOrigin(0.5);
+    overlay.add([title, sub]);
+    const yes = makeButton(this, GAME.WIDTH / 2, 610, '▶  Watch ad — save it!', {
+      width: 430, height: 84, fontSize: 30,
+      onTap: async () => {
+        overlay.destroy();
+        this.continueOverlay = null;
+        const granted = await getPlatform().rewardedBreak();
+        if (granted) this.doContinue();
+        else this.finalizeRun(reason);
+      },
+    });
+    const no = makeButton(this, GAME.WIDTH / 2, 720, 'No thanks', {
+      width: 260, height: 62, fill: 0x8a5a2b, fontSize: 26,
+      onTap: () => {
+        overlay.destroy();
+        this.continueOverlay = null;
+        this.finalizeRun(reason);
+      },
+    });
+    overlay.add([yes, no]);
+    overlay.iterate((o: Phaser.GameObjects.GameObject) => {
+      (o as unknown as { setScrollFactor?: (n: number) => void }).setScrollFactor?.(0);
+    });
+    yes.iterate?.((o: Phaser.GameObjects.GameObject) => {
+      (o as unknown as { setScrollFactor?: (n: number) => void }).setScrollFactor?.(0);
+    });
+    no.iterate?.((o: Phaser.GameObjects.GameObject) => {
+      (o as unknown as { setScrollFactor?: (n: number) => void }).setScrollFactor?.(0);
+    });
+    this.continueOverlay = overlay;
+  }
+
+  private doContinue(): void {
+    this.continueUsed = true;
+    track('continue_used', { height: this.stackHeight, mode: this.mode });
+    if (this.current) {
+      this.current.destroy();
+      this.current = null;
+    }
+    // Halve the lean: pull every pancake halfway back to centre.
+    for (const s of this.stack) {
+      s.baseX = STACK.CENTER_X + (s.baseX - STACK.CENTER_X) * 0.5;
+    }
+    this.lean = this.stack.length ? this.stack[this.stack.length - 1].baseX - STACK.CENTER_X : 0;
+    this.phase = 'ready';
+    this.inputCtl?.enable();
+    getPlatform().gameplayStart();
+    this.spawnPancake();
+    this.showFloatingText(STACK.CENTER_X, this.stackTopY - 150, 'Stack saved! 🙌', '#58B368', 38);
+  }
+
+  private finalizeRun(reason: string): void {
+    if (this.phase === 'replay') return;
+    this.phase = 'over';
+    getPlatform().gameplayStop();
+    this.trail?.stop();
+    this.inputCtl?.disable();
 
     const previousBest = loadBest();
     const isNewBest = this.score.total > previousBest;
-    if (isNewBest) saveBest(this.score.total);
+    if (isNewBest) {
+      saveBest(this.score.total);
+      getPlatform().happyTime?.();
+    }
 
     // Profile + missions + syrup settle at run end.
     const profile = loadProfile();

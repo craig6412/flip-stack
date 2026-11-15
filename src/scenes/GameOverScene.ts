@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { GAME, SCORING, loadBest } from '../config';
 import { bodyText, makeButton, titleText } from '../utils/ui';
+import { maybeCommercialBreak } from '../platform/Platform';
 import { sfx } from '../utils/sound';
 
 export interface GameOverData {
@@ -22,6 +23,7 @@ export class GameOverScene extends Phaser.Scene {
   }
 
   create(data: GameOverData): void {
+    void maybeCommercialBreak(); // between runs, throttled to ~2.5 min
     const cx = GAME.WIDTH / 2;
     this.cameras.main.setBackgroundColor('#FFF3D6');
     const best = loadBest();
