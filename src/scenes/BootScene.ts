@@ -1,12 +1,24 @@
 import Phaser from 'phaser';
+import { ASSETS } from '../config';
 
 /**
- * Generates every texture procedurally — zero external assets.
- * Pancake: golden ellipse with darker rim + butter pat drawn in Title/Game as sprites.
+ * Art pipeline (Phase 5): tries to load real art from public/assets/
+ * (see ASSETS in config.ts — ChatGPT sprites drop in there). Any file
+ * that is missing or fails to load falls back to the procedural texture
+ * below, so the game NEVER breaks because art is absent.
  */
 export class BootScene extends Phaser.Scene {
   constructor() {
     super('Boot');
+  }
+
+  preload(): void {
+    this.load.on('loaderror', () => {
+      /* missing art is expected — procedural fallback covers it */
+    });
+    for (const [key, path] of Object.entries(ASSETS)) {
+      this.load.image(key, path);
+    }
   }
 
   create(): void {
@@ -16,6 +28,11 @@ export class BootScene extends Phaser.Scene {
     this.makeParticleTexture();
     this.makeToppingTextures();
     this.scene.start('Title');
+  }
+
+  /** Generate only if a real asset didn't already provide this key. */
+  private gen(g: Phaser.GameObjects.Graphics, key: string, w: number, h: number): void {
+    if (!this.textures.exists(key)) g.generateTexture(key, w, h);
   }
 
   private makeToppingTextures(): void {
@@ -83,7 +100,7 @@ export class BootScene extends Phaser.Scene {
         for (let i = 1; i <= 3; i++) g.lineBetween((W / 4) * i, 8, (W / 4) * i, H - 8);
         g.lineBetween(14, H / 2 - 2, W - 14, H / 2 - 2);
       }
-      g.generateTexture(`pancake_top${suffix}`, W, H);
+      this.gen(g, `pancake_top${suffix}`, W, H);
       if (suffix === '') g.generateTexture('pancake', W, H);
       g.clear();
       // BOTTOM: paler version, no deco.
@@ -93,7 +110,7 @@ export class BootScene extends Phaser.Scene {
       g.fillEllipse(W / 2, H / 2, W, H - 6);
       g.fillStyle(0xffffff, 0.25);
       g.fillEllipse(W / 2, H / 2 - 3, W - 14, H - 16);
-      g.generateTexture(`pancake_bottom${suffix}`, W, H);
+      this.gen(g, `pancake_bottom${suffix}`, W, H);
       g.destroy();
     }
   }
@@ -112,7 +129,7 @@ export class BootScene extends Phaser.Scene {
     g.fillEllipse(W / 2 - 30, H / 2 + 2, 224, 34);
     g.fillStyle(0x69707f, 1);
     g.fillEllipse(W / 2 - 30, H / 2, 205, 24);
-    g.generateTexture('pan', W + 80, H);
+    this.gen(g, 'pan', W + 80, H);
     g.destroy();
   }
 
@@ -126,7 +143,7 @@ export class BootScene extends Phaser.Scene {
     g.fillEllipse(W / 2, H / 2, W, H - 8);
     g.fillStyle(0xe8edf3, 1);
     g.fillEllipse(W / 2, H / 2 - 2, W - 60, H - 18);
-    g.generateTexture('plate', W, H);
+    this.gen(g, 'plate', W, H);
     g.destroy();
   }
 

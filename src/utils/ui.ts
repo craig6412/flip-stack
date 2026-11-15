@@ -1,6 +1,6 @@
 import Phaser from 'phaser';
 
-export const FONT = 'Arial, Helvetica, sans-serif';
+export const FONT = '"Fredoka", "Arial Rounded MT Bold", Arial, Helvetica, sans-serif';
 export const COLORS = {
   bg: 0xfff3d6,
   cream: 0xfffaf0,

@@ -87,3 +87,26 @@ Notes for the native wrap:
 - **iOS motion permission:** the Title screen already ships a "Tap to enable motion" button that calls `DeviceMotionEvent.requestPermission()` from a user gesture, which is also what the WKWebView build needs.
 - **Safe areas / scaling:** the game uses Phaser `Scale.FIT` + `viewport-fit=cover`, so it letterboxes cleanly on notched phones.
 - **Sounds:** `src/utils/sound.ts` uses WebAudio only — it works unchanged inside Capacitor's WebView. Replace the synth placeholders with real samples there when ready.
+
+## v2 (Nov 2026) — what changed
+
+- **True fixed-step physics**: the Matter engine steps manually at 60Hz from an
+  accumulator (`autoUpdate: false`); all gameplay timing runs on sim time.
+  Same input = same result on any device/framerate. A determinism check lives
+  in the debug overlay (backtick key or 3-finger tap → "Determinism test").
+- **Skill-based flips**: power and spin are independent. Swipe length = power,
+  release speed = spin; circle loops = spin, circle speed = power; phone flick
+  peak = power, wrist snap = spin. The game never aims the flip for you.
+- **Landings judged at first contact**: perfect ≤6°, good ≤18°, sloppy 18–50°
+  (lands but pushes the stack), edge 50–130° and face-down >130° fail.
+- **Lean + sway**: the stack leans with sloppy landings (HUD meter), perfects
+  pull it back, >110px topples. The stack sways and the target moves.
+- **2.5D flip**: separate visual sprite — golden top (butter) vs pale bottom,
+  thickness swells flat / thins edge-on. Juice: trail, hit-stop, teeter,
+  streak banners, haptics, slow-mo replay of the last 1.2s on a fail.
+- **Retention**: 3-flip tutorial, Daily Stack (date-seeded, share text),
+  missions, cosmetic syrup shop (identical physics for every skin).
+- **Platform hooks**: `src/platform/Platform.ts` (Null / Poki / CrazyGames,
+  `?platform=poki`), rewarded continue once per run, local analytics events.
+- **Art pipeline**: drop PNGs into `public/assets/` using the keys in
+  `ASSETS` (config.ts) — procedural art is the fallback, never a hard break.
